@@ -1,0 +1,295 @@
+---
+title: "Final Project"
+author: "Group 6"
+date: "2021/8/4"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r include=FALSE}
+library(ggplot2)
+library(ggpubr)
+library(knitr)
+library(dplyr)
+library(leaflet)
+library(viridisLite)
+library(xtable)
+library(sn)
+require(plotrix)
+set.seed(7792100)
+```
+
+# Orginial Data
+```{r}
+all_data <- read.csv("./Data/listings.csv", encoding="UTF-8", fill=TRUE, header=TRUE)
+summary(all_data)
+```
+
+# Data Cleaning
+(1) Delete the variables: `id`, `name`, `host_id`, `host_name`, `neighbourhood_group`.
+(2) Set `reviews_per_month` = 0 if `number_of_reviews` = 0.
+(3) Delete `room_type` is hotel room because there are only two data.
+(4) Delete `price` = 0 because it is not practical.
+(5) Change the `neighbourhood` name to totally English name.
+```{r}
+data <- all_data[,-c(1:5)]
+data$reviews_per_month[data$number_of_reviews == 0] <- 0
+data <- data[data$room_type != 'Hotel room', ]
+data <- data[data$price != 0, ]
+for(i in 1 : nrow(data)) {
+   district <- sub(" ", "", unlist(strsplit(data$neighbourhood[i], split= '/'))[2])
+   if (district == "Pudong")
+     district = "Pudong New District"
+   data$neighbourhood[i] <- district
+}
+summary(data)
+```
+
+# Data Overview
+## Price
+```{r}
+price_density <- ggplot(data, aes(x=price)) + geom_density(color="darkblue", fill="lightblue")
+data$logprice <- log1p(data$price)
+logprice_density <- ggplot(data, aes(x=logprice)) + geom_density(color="darkblue", fill="lightblue")
+ggarrange(price_density, logprice_density, ncol=2, nrow=1)
+```
+
+## Location
+```{r}
+pal <- colorBin(palette = c("#6495ED", "#32CD32", "#FF4500"), domain = data$price, bins = c(0, 1000, 10000, 100000), pretty = FALSE)
+leaflet(data) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addCircleMarkers(lng = ~longitude, lat = ~latitude, radius = 0.5, color = ~pal(price)) %>%
+  addLegend("bottomright", pal = pal, values = ~price, title = "Price", labFormat = labelFormat(prefix = "￥"), opacity = 1)
+```
+
+# Simulation
+## Test Statistic Comparison for Discrete Data
+```{r}
+rejection_dis <- function(f, g, h, distname) {
+  k <- 100
+  rejections <- replicate(k, {
+    df <- data.frame(y = c(f(), g(), h()), 
+                     x = c(rep(1,length(f())), rep(2,length(g())), rep(3,length(h()))))
+    obsF <- summary(aov(y~x, data=df))[[1]]$"F value"[1]
+    obsmean <- mean(f()) - (mean(g()) + mean(h())) / 2
+    obsmedian <- median(f()) - (median(g()) + median(h())) / 2
+  
+    perm <- replicate(100, {
+      i <- sample(nrow(df))
+      Fs <- summary(aov(y~x[i], data=df))[[1]]$"F value"[1]
+      means <- mean(df$y[i[1:length(f())]]) - 
+        (mean(df$y[i[(length(f())+1):(length(f())+length(g()))]]) + 
+           mean(df$y[i[(length(f())+length(g())+1):nrow(df)]])) / 2
+      medians <- median(df$y[i[1:length(f())]]) - 
+        (median(df$y[i[(length(f())+1):(length(f())+length(g()))]]) + 
+           median(df$y[i[(length(f())+length(g())+1):nrow(df)]])) / 2
+      c(Fs, means, medians)
+    })
+    
+    c((2 * min(mean(perm[1,] >= obsF), mean(perm[1,] <= obsF))) < 0.05, 
+      (2 * min(mean(perm[2,] >= obsmean), mean(perm[2,] <= obsmean))) < 0.05,
+      (2 * min(mean(perm[3,] >= obsmedian), mean(perm[3,] <= obsmedian))) < 0.05)
+  })
+
+  est.aov <- mean(rejections[1,])
+  ci.aov <- binom.test(sum(rejections[1,]), k, conf.level = 0.99)$conf.int
+  
+  est.mean <- mean(rejections[2,])
+  ci.mean <- binom.test(sum(rejections[2,]), k, conf.level = 0.99)$conf.int
+  
+  est.median <- mean(rejections[3,])
+  ci.median <- binom.test(sum(rejections[3,]), k, conf.level = 0.99)$conf.int
+  
+  data.frame(Test = c("ANOVA Test", "Difference of Means", "Difference of Medians"), Estimate = c(est.aov, est.mean, est.median), Lower = c(ci.aov[1], ci.mean[1], ci.median[1]), Upper = c(ci.aov[2], ci.mean[2], ci.median[2]), Distribution = distname)
+}
+```
+$F = G = H \sim N(0, 2)$
+```{r}
+f <- function() { rnorm(30, 0, 2) }
+g <- function() { rnorm(30, 0, 2) }
+h <- function() { rnorm(30, 0, 2) }
+dis_norm_err <- rejection_dis(f, g, h, "Normal")
+```
+$F \sim N(0, 2), G \sim N(1, 2), H \sim N(2, 2)$
+```{r}
+f <- function() { rnorm(30, 0, sqrt(2)) }
+g <- function() { rnorm(30, 1, sqrt(2)) }
+h <- function() { rnorm(30, 2, sqrt(2)) }
+dis_norm_power <- rejection_dis(f, g, h, "Normal")
+```
+$F = G = H \sim Lognormal(0, 2)$
+```{r}
+f <- function() { rlnorm(30, 0, sqrt(2)) }
+g <- function() { rlnorm(30, 0, sqrt(2)) }
+h <- function() { rlnorm(30, 0, sqrt(2)) }
+dis_log_err <- rejection_dis(f, g, h, "Log-normal")
+```
+$F \sim Lognormal(0, 2), G \sim Lognormal(1, 2), H \sim Lognormal(2, 2)$
+```{r}
+f <- function() { rlnorm(100, 0, sqrt(2)) }
+g <- function() { rlnorm(100, 1, sqrt(2)) }
+h <- function() { rlnorm(100, 2, sqrt(2)) }
+dis_log_power <- rejection_dis(f, g, h, "Log-normal")
+```
+$F = G = H \sim SN(4)$
+```{r}
+f <- function() { rsn(100, 4) }
+g <- function() { rsn(100, 4) }
+h <- function() { rsn(100, 4) }
+dis_skew_err <- rejection_dis(f, g, h, "Skew normal")
+```
+$F \sim SN(4), G \sim SN(4), H \sim SN(4) + 1$
+```{r}
+f <- function() { rsn(100, 4) }
+g <- function() { rsn(100, 4) }
+h <- function() { rsn(100, 4) + 1 }
+dis_skew_power <- rejection_dis(f, g, h, "Skew normal")
+```
+$F = G = H \sim t(4)$
+```{r}
+f <- function() { rt(100, 4) }
+g <- function() { rt(100, 4) }
+h <- function() { rt(100, 4) }
+dis_t_err <- rejection_dis(f, g, h, "Student's t")
+```
+$F \sim t(4), G \sim t(4), H \sim t(4) + 1$
+```{r}
+f <- function() { rt(100, 4) }
+g <- function() { rt(100, 4) }
+h <- function() { rt(100, 4) + 1 }
+dis_t_power <- rejection_dis(f, g, h, "Student's t")
+```
+```{r}
+dis_allerror <- data.frame(rbind(dis_norm_err, dis_log_err, dis_skew_err, dis_t_err))
+ggplot(dis_allerror, aes(x = Distribution, y = Estimate, colour = Test)) + geom_hline(yintercept = 0.05, colour = gray(1/2), lty = 2) + geom_point(position = position_dodge(width = 1/2), size = 2) + geom_errorbar(aes(ymin = Lower, ymax = Upper), lwd = 1, position = position_dodge(width = 1/2), width = 0.5)  + ylab("Type-I Error") + coord_flip() + theme_bw() + guides(color = guide_legend(reverse = TRUE))
+dis_allpower <- data.frame(rbind(dis_norm_power, dis_log_power, dis_skew_power, dis_t_power))
+ggplot(dis_allpower, aes(x = Distribution, y = Estimate, colour = Test))  + geom_point(position = position_dodge(width = 1/2), size = 2) + geom_errorbar(aes(ymin = Lower, ymax = Upper), lwd = 1, position = position_dodge(width = 1/2), width = 0.5)  + ylab("Power") + coord_flip() + theme_bw() + guides(color = guide_legend(reverse = TRUE))
+```
+
+## Test Statistic Comparison for Numeric Data
+```{r}
+rejection_num <- function(f, g, distname) {
+  k <- 100
+  rejections <- replicate(k, {
+    df <- data.frame(x = f(), y = g())
+    obsKen <- cor.test(df$x, df$y, method="kendall")$p.value
+    obsSpe <- cor.test(df$x, df$y, method="spearman")$p.value
+    perm <- replicate(100, {
+      i <- sample(nrow(df))
+      kens <- cor.test(df$x, df$y[i], method="kendall")$p.value
+      spes <- cor.test(df$x, df$y[i], method="spearman")$p.value
+      c(kens, spes)
+    })
+    
+    c((2 * min(mean(perm[1,] >= obsKen), mean(perm[1,] <= obsKen))) < 0.05, 
+      (2 * min(mean(perm[2,] >= obsSpe), mean(perm[2,] <= obsSpe))) < 0.05)
+  })
+
+  est.ken <- mean(rejections[1,])
+  ci.ken <- binom.test(sum(rejections[1,]), k, conf.level = 0.99)$conf.int
+  
+  est.spe <- mean(rejections[2,])
+  ci.spe <- binom.test(sum(rejections[2,]), k, conf.level = 0.99)$conf.int
+  
+  data.frame(Test = c("Kendall rank correlation test", "Spearman rank correlation test"), Estimate = c(est.ken, est.spe), Lower = c(ci.ken[1], ci.spe[1]), Upper = c(ci.ken[2], ci.spe[2]), Distribution = distname)
+}
+```
+$F = G \sim N(0, 2)$
+```{r}
+f <- function() { rnorm(30, 0, 2) }
+g <- function() { rnorm(30, 0, 2) }
+num_norm_err <- rejection_num(f, g, "Normal")
+```
+$F \sim N(0, 2), G \sim N(1, 2) + 2$
+```{r}
+f <- function() { rnorm(30, 0, sqrt(2)) }
+g <- function() { rnorm(30, 1, sqrt(2)) + 2 }
+num_norm_power <- rejection_num(f, g, "Normal")
+```
+$F = G \sim Lognormal(0, 2)$
+```{r}
+f <- function() { rlnorm(30, 0, sqrt(2)) }
+g <- function() { rlnorm(30, 0, sqrt(2)) }
+num_log_err <- rejection_num(f, g, "Log-normal")
+```
+$F \sim Lognormal(0, 2), G \sim Lognormal(1, 2) + 2$
+```{r}
+f <- function() { rlnorm(100, 0, sqrt(2)) }
+g <- function() { rlnorm(100, 1, sqrt(2)) + 2}
+num_log_power <- rejection_num(f, g, "Log-normal")
+```
+$F = G \sim SN(4)$
+```{r}
+f <- function() { rsn(100, 4) }
+g <- function() { rsn(100, 4) }
+num_skew_err <- rejection_num(f, g, "Skew normal")
+```
+$F \sim SN(4), G \sim SN(4) + 2$
+```{r}
+f <- function() { rsn(100, 4) }
+g <- function() { rsn(100, 4) + 2 }
+num_skew_power <- rejection_num(f, g, "Skew normal")
+```
+$F = G \sim t(4)$
+```{r}
+f <- function() { rt(100, 4) }
+g <- function() { rt(100, 4) }
+num_t_err <- rejection_num(f, g, "Student's t")
+```
+$F \sim t(4), G \sim t(4) + 2$
+```{r}
+f <- function() { rt(100, 4) }
+g <- function() { rt(100, 4) + 2 }
+num_t_power <- rejection_num(f, g, "Student's t")
+```
+```{r}
+num_allerror <- data.frame(rbind(num_norm_err, num_log_err, num_skew_err, num_t_err))
+ggplot(num_allerror, aes(x = Distribution, y = Estimate, colour = Test)) + geom_hline(yintercept = 0.05, colour = gray(1/2), lty = 2) + geom_point(position = position_dodge(width = 1/2), size = 2) + geom_errorbar(aes(ymin = Lower, ymax = Upper), lwd = 1, position = position_dodge(width = 1/2), width = 0.5)  + ylab("Type-I Error") + coord_flip() + theme_bw() + guides(color = guide_legend(reverse = TRUE))
+num_allpower <- data.frame(rbind(num_norm_power, num_log_power, num_skew_power, num_t_power))
+ggplot(num_allpower, aes(x = Distribution, y = Estimate, colour = Test))  + geom_point(position = position_dodge(width = 1/2), size = 2) + geom_errorbar(aes(ymin = Lower, ymax = Upper), lwd = 1, position = position_dodge(width = 1/2), width = 0.5)  + ylab("Power") + coord_flip() + theme_bw() + guides(color = guide_legend(reverse = TRUE))
+```
+
+
+# Analysis
+## Permutation Tests for Discrete Data —— room_type
+```{r}
+type_count <- data %>% group_by(room_type) %>% summarise(count = n())
+kable(type_count, align = "c")
+ggplot(data, aes(x=logprice, fill=room_type)) + geom_density(alpha=0.4) + theme_bw()
+```
+
+### Difference of Means Test
+```{r}
+(obs <- mean(data$logprice[data$room_type == "Entire home/apt"]) - (mean(data$logprice[data$room_type == "Private room"]) + mean(data$logprice[data$room_type == "Shared room"])) / 2)
+num1 <- as.numeric(type_count[1,2])
+num2 <- as.numeric(type_count[2,2])
+num3 <- as.numeric(type_count[3,2])
+xs <- replicate(1000, {
+  i <- sample(nrow(data))
+  mean(data$logprice[i[1:num1]]) - (mean(data$logprice[i[(num1+1):(num1+num2)]]) + mean(data$logprice[i[(num1+num2+1):(num1+num2+num3)]])) / 2
+})
+hist(xs, xlim = c(min(obs, min(xs)), c(max(obs, max(xs)))))
+abline(v = obs, col = "red", lwd = 2)
+2 * min(mean(obs <= xs), mean(obs >= xs))
+```
+
+
+## Independent Tests for Numeric Data —— reviews_per_month
+```{r}
+data$logreviews <- log1p(data$reviews_per_month)
+ggplot(data, aes(x=logreviews, y=logprice)) + geom_point(color='lightblue') + theme_bw()
+```
+
+### Kendall rank correlation test
+```{r}
+(obs <- cor.test(data$logprice, data$logreviews, method="kendall")$p.value)
+xs <- replicate(1000, {
+  i <- sample(nrow(data))
+  cor.test(data$logprice, data$logreviews[i], method="kendall")$p.value
+})
+hist(xs, xlim = c(min(obs, min(xs)), c(max(obs, max(xs)))))
+abline(v = obs, col = "red", lwd = 2)
+2 * min(mean(obs <= xs), mean(obs >= xs))
+```
